@@ -6,5 +6,5 @@
 
 [数据结构](https://cloud.tsinghua.edu.cn/d/76cbab99574046698804/): 邓俊辉版
 
-[大化数据结构](): 容易学进去的一本数据结构书
+[大化数据结构](https://book.douban.com/subject/6424904/): 容易学进去的一本数据结构书
 
