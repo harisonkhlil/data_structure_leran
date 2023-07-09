@@ -1,5 +1,7 @@
 # 重新学习数据结构
 
+写作环境, *Vim + markdown* and *Typora*
+
 ## Reference
 
 [Hello Algorithm](https://www.hello-algo.com/): 一个基础学习数据结构的网站
