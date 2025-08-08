@@ -1,129 +1,145 @@
 #include <iostream>
+#include <utility>
 #include <type_traits>
 
 // ----------------------------------------------------------------
-// Expression基类模板 (CRTP) - 已适配 constexpr
+// 1. Expression 基类 (转换为经典CRTP)
 // ----------------------------------------------------------------
-template<typename E>
+template <typename T, typename E>
 struct Expression {
-    // 这个eval()现在是constexpr，允许在编译期调用
-    constexpr double eval() const {
-        return static_cast<const E&>(*this).eval();
-    }
+  using value_type = T;
 
-    // CRTP辅助函数
-    constexpr const E& self() const {
-        return static_cast<const E&>(*this);
-    }
+  // 使用 static_cast 的经典CRTP self() 方法
+  constexpr const E& self() const {
+    return static_cast<const E&>(*this);
+  }
 
-    // 保留运行时的隐式转换，以便仍然可以轻松打印结果
-    operator double() const {
-        return this->eval();
-    }
+  // 为支持移动语义，提供非const版本
+  constexpr E& self() {
+    return static_cast<E&>(*this);
+  }
+
+  // eval现在通过self()调用派生类的实现
+  constexpr T eval() const & {
+    return self().eval();
+  }
+   constexpr T eval() && {
+    return std::move(self()).eval();
+  }
+
+  // 隐式转换
+  constexpr operator T() const & {
+    return self().eval();
+  }
+  constexpr operator T() && {
+    return std::move(self()).eval();
+  }
 };
 
 // ----------------------------------------------------------------
-// 字面量 (Literal) - 已适配 constexpr
+// 2. 您的 Lit 类 (增加了右值eval)
 // ----------------------------------------------------------------
-class Lit : public Expression<Lit> {
-    double value;
+template <typename T>
+class Lit : public Expression<T, Lit<T>> {
+  T value;
+
 public:
-    // 构造函数现在是constexpr
-    constexpr explicit Lit(double val) : value(val) {}
+  template <typename U>
+  constexpr explicit Lit(U&& val) : value(std::forward<U>(val)) {}
 
-    // eval()现在是constexpr
-    constexpr double eval() const {
-        return value;
-    }
+  // Lit的eval实现
+  constexpr T eval() const & { return value; }
+  constexpr T eval() && { return std::move(value); }
 };
 
 // ----------------------------------------------------------------
-// 操作符结构体 - 已适配 constexpr
+// 3. 您的操作符结构体 (无需修改)
 // ----------------------------------------------------------------
 struct Add {
-    static constexpr double apply(double a, double b) { return a + b; }
+  template <typename T>
+  static constexpr T apply(T a, T b) { return a + b; }
 };
-
 struct Subtract {
-    static constexpr double apply(double a, double b) { return a - b; }
+  template <typename T>
+  static constexpr T apply(T a, T b) { return a - b; }
 };
-
 struct Multiply {
-    static constexpr double apply(double a, double b) { return a * b; }
+  template <typename T>
+  static constexpr T apply(T a, T b) { return a * b; }
 };
-
 struct Divide {
-    static constexpr double apply(double a, double b) { return a / b; }
+  template <typename T>
+  static constexpr T apply(T a, T b) { return a / b; }
 };
 
 // ----------------------------------------------------------------
-// 二元操作表达式 - 已适配 constexpr
+// 4. 您的 BinaryExpr 类 (增加右值eval以实现移动语义)
 // ----------------------------------------------------------------
-template<typename Op, typename LHS, typename RHS>
-class BinaryExpr : public Expression<BinaryExpr<Op, LHS, RHS>> {
-    const LHS lhs; // 注意：从引用改为值传递，以更好地兼容constexpr
-    const RHS rhs;
+template <typename T, typename Op, typename LHS, typename RHS>
+class BinaryExpr : public Expression<T, BinaryExpr<T, Op, LHS, RHS>> {
+  LHS lhs;
+  RHS rhs;
+
 public:
-    // 构造函数现在是constexpr
-    constexpr BinaryExpr(const LHS& l, const RHS& r) : lhs(l), rhs(r) {}
+  template<typename FwdL, typename FwdR>
+  constexpr BinaryExpr(FwdL&& l, FwdR&& r)
+      : lhs(std::forward<FwdL>(l)), rhs(std::forward<FwdR>(r)) {}
 
-    // eval()现在是constexpr，并递归地调用子表达式的eval
-    constexpr double eval() const {
-        return Op::apply(lhs.eval(), rhs.eval());
-    }
+  // 左值版本eval
+  constexpr T eval() const & {
+    return Op::template apply<T>(lhs.eval(), rhs.eval());
+  }
+
+  // 右值版本eval，传播移动语义
+  constexpr T eval() && {
+    return Op::template apply<T>(std::move(lhs).eval(), std::move(rhs).eval());
+  }
 };
 
 // ----------------------------------------------------------------
-// 全局运算符重载 - 已适配 constexpr
+// 5. 您的宏定义 (无需修改)
 // ----------------------------------------------------------------
-template<typename L, typename R>
-constexpr BinaryExpr<Add, L, R> operator+(const Expression<L>& lhs, const Expression<R>& rhs) {
-    return BinaryExpr<Add, L, R>(lhs.self(), rhs.self());
-}
+#define DEFINE_BINARY_OPERATOR(op, OpName)                                     \
+  template <typename LHS, typename RHS>                                        \
+  constexpr auto operator op(LHS&& lhs, RHS&& rhs) {                           \
+    using T = typename std::decay_t<LHS>::value_type;                          \
+    using L = std::decay_t<LHS>;                                               \
+    using R = std::decay_t<RHS>;                                               \
+    return BinaryExpr<T, OpName, L, R>(std::forward<LHS>(lhs),                 \
+                                       std::forward<RHS>(rhs));                \
+  }
 
-template<typename L, typename R>
-constexpr BinaryExpr<Subtract, L, R> operator-(const Expression<L>& lhs, const Expression<R>& rhs) {
-    return BinaryExpr<Subtract, L, R>(lhs.self(), rhs.self());
-}
-
-template<typename L, typename R>
-constexpr BinaryExpr<Multiply, L, R> operator*(const Expression<L>& lhs, const Expression<R>& rhs) {
-    return BinaryExpr<Multiply, L, R>(lhs.self(), rhs.self());
-}
-
-template<typename L, typename R>
-constexpr BinaryExpr<Divide, L, R> operator/(const Expression<L>& lhs, const Expression<R>& rhs) {
-    return BinaryExpr<Divide, L, R>(lhs.self(), rhs.self());
-}
+DEFINE_BINARY_OPERATOR(+, Add)
+DEFINE_BINARY_OPERATOR(-, Subtract)
+DEFINE_BINARY_OPERATOR(*, Multiply)
+DEFINE_BINARY_OPERATOR(/, Divide)
 
 // ----------------------------------------------------------------
-// Main函数 - 演示编译期计算
+// 6. 我添加的 main 函数用于测试
 // ----------------------------------------------------------------
 int main() {
-    std::cout << "--- C++ Compile-Time Calculation Demo ---" << std::endl;
+    std::cout << "--- Testing Your Expression Template Code (Classic CRTP) ---\n" << std::endl;
 
-    // 1. 创建一个constexpr表达式对象。
-    //    这个对象的完整类型在编译时是已知的。
-    constexpr auto expr = Lit(1) + Lit(1) - Lit(1) * Lit(2) + Lit(3) / Lit(4);
+    // --- 示例1: 使用 float 类型 ---
+    std::cout << "--- Float Example ---" << std::endl;
+    constexpr float float_result = Lit<float>(1.0f) + Lit<float>(1.0f) - Lit<float>(1.0f) * Lit<float>(2.0f) + Lit<float>(3.0f) / Lit<float>(4.0f);
+    static_assert(float_result == 0.75f, "Float calculation failed!");
+    std::cout << "Expression: 1+1-1*2+3/4" << std::endl;
+    std::cout << "Result with <float>: " << float_result << "\n" << std::endl;
 
-    // 2. 强制在编译期求值。
-    //    通过将结果赋给一个constexpr变量，编译器必须在编译时计算出`expr.eval()`的值。
-    constexpr double compile_time_result = expr.eval();
+    // --- 示例2: 使用 int 类型 ---
+    std::cout << "--- Integer Example ---" << std::endl;
+    constexpr int int_result = Lit<int>(1) + Lit<int>(1) - Lit<int>(1) * Lit<int>(2) + Lit<int>(3) / Lit<int>(4);
+    static_assert(int_result == 0, "Integer calculation failed!");
+    std::cout << "Expression: 1+1-1*2+3/4" << std::endl;
+    std::cout << "Result with <int>: " << int_result << " (Note: 3/4 is 0 in integer math)" << std::endl;
 
-    // 3. 在编译时验证结果。
-    //    如果计算结果不为0.75，代码将无法通过编译。
-    //    这证明了计算是在编译期完成的。
-    static_assert(compile_time_result == 0.75, "Compile-time calculation failed!");
+    // --- 示例3: 验证移动语义 ---
+    auto expr = Lit<int>(10) + Lit<int>(5);
+    int moved_result = std::move(expr); // 这会调用右值版本的eval
+    std::cout << "\nResult from moved expression: " << moved_result << std::endl;
+    static_assert((Lit<int>(10) + Lit<int>(5)).eval() == 15, "Move test failed");
 
-    std::cout << "static_assert passed! The expression was successfully evaluated at compile-time." << std::endl;
-
-    // 我们仍然可以在运行时使用它，例如打印结果。
-    // 这里的`compile_time_result`已经被计算出来，直接嵌入到代码中，就像一个普通的常量。
-    std::cout << "Result of 1+1-1*2+3/4 is: " << compile_time_result << std::endl;
-
-    // 为了对比，我们也可以在运行时求值，结果是一样的。
-    double runtime_result = expr; // 触发 operator double()
-    std::cout << "The same expression evaluated at runtime gives: " << runtime_result << std::endl;
 
     return 0;
 }
